@@ -6,17 +6,20 @@ Primary book: FanDuel (Fanatics proxy). Compares DraftKings and BetMGM for line 
 """
 
 import json
+import os
 import urllib.request
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 API_KEY = "26dcaafb7d69e3ac46d339c733105f90"
 BASE = "https://api.the-odds-api.com/v4"
 MLB_API = "https://statsapi.mlb.com/api/v1"
 BOOKS = ["fanduel", "draftkings", "betmgm"]
+ALL_BOOKS = ["fanduel", "draftkings", "betmgm", "betonlineag", "betrivers", "betus", "bovada", "lowvig", "mybookieag"]
 PRIMARY = "fanduel"
 EASTERN = ZoneInfo("America/New_York")
+CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lines_cache.json")
 
 # Park HR factors (above 1.0 = hitter friendly, below = pitcher friendly)
 PARK_FACTORS = {
@@ -109,6 +112,211 @@ def best_odds_across_books(bookmakers, market_key, outcome_name, point=None, des
                         best = o["price"]
                         best_book = bm["title"]
     return best, best_book
+
+# ── Line Movement Cache ───────────────────────────────────────────────────────
+
+def load_lines_cache():
+    if os.path.exists(CACHE_FILE):
+        try:
+            return json.load(open(CACHE_FILE))
+        except Exception:
+            pass
+    return {}
+
+def save_lines_cache(cache):
+    json.dump(cache, open(CACHE_FILE, "w"), indent=2)
+
+def detect_line_moves(games, sport_label, cache):
+    """
+    Compare current FanDuel moneylines to cached opening lines.
+    Returns list of significant moves (10+ pts) and updates cache.
+    """
+    moves = []
+    today = datetime.now(EASTERN).strftime("%Y-%m-%d")
+    for game in games:
+        for team, book_odds in game["sides"].items():
+            if PRIMARY not in book_odds:
+                continue
+            current = book_odds[PRIMARY]
+            key = f"{today}|{sport_label}|{game['matchup']}|{team}"
+            if key not in cache:
+                cache[key] = current  # store as opening line
+            else:
+                opening = cache[key]
+                move = current - opening
+                if abs(move) >= 10:
+                    moves.append({
+                        "sport": sport_label,
+                        "matchup": game["matchup"],
+                        "time": game["time"],
+                        "team": team,
+                        "opening": opening,
+                        "current": current,
+                        "move": move,
+                    })
+    return moves
+
+
+# ── +EV Calculator ────────────────────────────────────────────────────────────
+
+def no_vig_true_prob(all_odds_side_a, all_odds_side_b):
+    """
+    Given lists of American odds for both sides of a market across all books,
+    calculate the no-vig true probability for side A.
+    """
+    probs_a = []
+    for oa, ob in zip(all_odds_side_a, all_odds_side_b):
+        imp_a = american_to_implied(oa) / 100
+        imp_b = american_to_implied(ob) / 100
+        total = imp_a + imp_b
+        probs_a.append(imp_a / total)  # remove vig
+    return sum(probs_a) / len(probs_a) if probs_a else None
+
+def ev_pct(book_odds, true_prob):
+    """Expected value as a percentage."""
+    return ((true_prob * american_to_decimal(book_odds)) - 1) * 100
+
+def get_ev_moneylines(sport_key, sport_label):
+    """Pull moneylines from all books, find +EV plays vs consensus."""
+    url = (f"{BASE}/sports/{sport_key}/odds/"
+           f"?apiKey={API_KEY}&regions=us&markets=h2h"
+           f"&oddsFormat=american")  # no bookmakers filter = all books
+    games = fetch(url)
+    today_games = [g for g in games if is_today(g["commence_time"])]
+
+    ev_plays = []
+    for game in today_games:
+        teams = [game["away_team"], game["home_team"]]
+        # Collect odds per team per book
+        book_odds = {t: {} for t in teams}
+        for bm in game.get("bookmakers", []):
+            for mkt in bm.get("markets", []):
+                if mkt["key"] != "h2h":
+                    continue
+                for o in mkt["outcomes"]:
+                    book_odds[o["name"]][bm["key"]] = o["price"]
+
+        # Need both sides from same books to remove vig
+        shared_books = set(book_odds[teams[0]].keys()) & set(book_odds[teams[1]].keys())
+        if len(shared_books) < 3:
+            continue
+
+        odds_a = [book_odds[teams[0]][b] for b in shared_books]
+        odds_b = [book_odds[teams[1]][b] for b in shared_books]
+        true_a = no_vig_true_prob(odds_a, odds_b)
+        true_b = 1 - true_a if true_a else None
+        if not true_a:
+            continue
+
+        for team, true_prob in [(teams[0], true_a), (teams[1], true_b)]:
+            if PRIMARY not in book_odds[team]:
+                continue
+            fd_price = book_odds[team][PRIMARY]
+            ev = ev_pct(fd_price, true_prob)
+            if ev > 0:
+                best_price = max(book_odds[team].values())
+                best_book = [b for b, p in book_odds[team].items() if p == best_price][0]
+                best_ev = ev_pct(best_price, true_prob)
+                ev_plays.append({
+                    "sport": sport_label,
+                    "matchup": f"{game['away_team']} @ {game['home_team']}",
+                    "time": game_time(game["commence_time"]),
+                    "team": team,
+                    "true_prob": true_prob,
+                    "fanduel": fd_price,
+                    "fd_ev": ev,
+                    "best_price": best_price,
+                    "best_book": best_book,
+                    "best_ev": best_ev,
+                    "books_used": len(shared_books),
+                })
+
+    ev_plays.sort(key=lambda x: -x["best_ev"])
+    return ev_plays
+
+def get_ev_totals(sport_key, sport_label):
+    """Pull game totals from all books, find +EV plays vs consensus."""
+    url = (f"{BASE}/sports/{sport_key}/odds/"
+           f"?apiKey={API_KEY}&regions=us&markets=totals&oddsFormat=american")
+    games = fetch(url)
+    today_games = [g for g in games if is_today(g["commence_time"])]
+
+    ev_plays = []
+    for game in today_games:
+        # Collect over/under odds per book per line
+        lines = {}
+        for bm in game.get("bookmakers", []):
+            for mkt in bm.get("markets", []):
+                if mkt["key"] != "totals":
+                    continue
+                for o in mkt["outcomes"]:
+                    pt = o["point"]
+                    side = o["name"]
+                    key = f"{pt}|{side}"
+                    if key not in lines:
+                        lines[key] = {}
+                    lines[key][bm["key"]] = o["price"]
+
+        # Match over/under pairs at same point
+        points = set(k.split("|")[0] for k in lines)
+        for pt in points:
+            over_key = f"{pt}|Over"
+            under_key = f"{pt}|Under"
+            if over_key not in lines or under_key not in lines:
+                continue
+            shared = set(lines[over_key].keys()) & set(lines[under_key].keys())
+            if len(shared) < 3:
+                continue
+            odds_o = [lines[over_key][b] for b in shared]
+            odds_u = [lines[under_key][b] for b in shared]
+            true_o = no_vig_true_prob(odds_o, odds_u)
+            true_u = 1 - true_o if true_o else None
+            if not true_o:
+                continue
+            for side_key, side_label, true_p in [(over_key, "Over", true_o), (under_key, "Under", true_u)]:
+                if PRIMARY not in lines[side_key]:
+                    continue
+                fd_price = lines[side_key][PRIMARY]
+                ev = ev_pct(fd_price, true_p)
+                if ev > 0:
+                    best_price = max(lines[side_key].values())
+                    best_book = [b for b, p in lines[side_key].items() if p == best_price][0]
+                    best_ev = ev_pct(best_price, true_p)
+                    ev_plays.append({
+                        "sport": sport_label,
+                        "matchup": f"{game['away_team']} @ {game['home_team']}",
+                        "time": game_time(game["commence_time"]),
+                        "side": side_label,
+                        "point": float(pt),
+                        "true_prob": true_p,
+                        "fanduel": fd_price,
+                        "fd_ev": ev,
+                        "best_price": best_price,
+                        "best_book": best_book,
+                        "best_ev": best_ev,
+                        "books_used": len(shared),
+                    })
+
+    ev_plays.sort(key=lambda x: -x["best_ev"])
+    return ev_plays
+
+
+# ── Confirmed Lineups ─────────────────────────────────────────────────────────
+
+def get_confirmed_lineups():
+    """Returns a set of player full names confirmed in today's MLB lineups."""
+    today = datetime.now(EASTERN).strftime("%Y-%m-%d")
+    data = mlb_fetch(
+        f"{MLB_API}/schedule?sportId=1&date={today}&hydrate=lineups,team"
+    )
+    confirmed = set()
+    for date in data.get("dates", []):
+        for game in date.get("games", []):
+            for side in ["awayPlayers", "homePlayers"]:
+                for p in game.get("lineups", {}).get(side, []):
+                    confirmed.add(p["fullName"])
+    return confirmed
+
 
 # ── MLB Stats API ─────────────────────────────────────────────────────────────
 
@@ -415,11 +623,12 @@ def american_to_decimal(odds):
     else:
         return (100 / abs(odds)) + 1
 
-def build_hr_parlay(mlb_props):
+def build_hr_parlay(mlb_props, confirmed_lineups=None):
     """
     Pick 3-4 HR parlay legs using real analytics:
     - HR/PA rate (season), recent form (last 14G), platoon matchup, ballpark factor
     - One player per game, odds filtered to +150–+550
+    - Only confirmed starters if lineup data available
     """
     pitchers = get_today_probable_pitchers()
 
@@ -437,6 +646,9 @@ def build_hr_parlay(mlb_props):
             best_book = [b for b, o in prop["odds"].items() if o == best_price][0]
             fd_odds = prop["odds"].get(PRIMARY, best_price)
             if best_price < 150 or best_price > 550:
+                continue
+            # Skip players not in confirmed lineup (if lineup data available)
+            if confirmed_lineups and prop["player"] not in confirmed_lineups:
                 continue
             raw_candidates.append({
                 "player": prop["player"],
@@ -509,8 +721,8 @@ def best_props_value(all_props):
 
 # ── Formatter ─────────────────────────────────────────────────────────────────
 
-def print_hr_parlay(mlb_props):
-    parlay = build_hr_parlay(mlb_props)
+def print_hr_parlay(mlb_props, confirmed_lineups=None):
+    parlay = build_hr_parlay(mlb_props, confirmed_lineups)
     divider = "═" * 70
     print(f"\n{divider}")
     if not parlay:
@@ -531,13 +743,66 @@ def print_hr_parlay(mlb_props):
         print(f"         {leg['matchup']}  {leg['time']}")
         if leg.get("reason"):
             print(f"         WHY: {leg['reason']}")
-    print(f"\n  PARLAY ODDS: {format_odds(parlay['combined_american'])}  "
+    lineup_status = "✅ All legs confirmed in starting lineup" if confirmed_lineups else "⚠️  Lineups not yet confirmed — verify before placing"
+    print(f"\n  {lineup_status}")
+    print(f"  PARLAY ODDS: {format_odds(parlay['combined_american'])}  "
           f"({parlay['combined_decimal']}x)")
     print(f"  $100 wins ${round((parlay['combined_decimal'] - 1) * 100)}")
     print(divider + "\n")
 
 
-def print_report(nba_lines, mlb_lines, nba_totals, mlb_totals, nba_props, mlb_props, mlb_hr_props=None):
+def print_ev_section(ev_ml_nba, ev_ml_mlb, ev_tot_nba, ev_tot_mlb):
+    divider = "═" * 70
+    all_plays = ev_ml_nba + ev_ml_mlb + ev_tot_nba + ev_tot_mlb
+    all_plays.sort(key=lambda x: -x["best_ev"])
+
+    print(f"\n{divider}")
+    print(f"  ⚡  +EV PLAYS  (Edge vs Consensus Line)")
+    print(f"  How to read: EV% = how much you gain per $100 bet on average")
+    print(divider)
+
+    if not all_plays:
+        print("  No +EV plays found today.\n")
+        return
+
+    for p in all_plays[:12]:
+        if "team" in p:  # moneyline
+            label = f"{p['team']}  ML"
+        else:  # total
+            label = f"{p['side']} {p['point']}  Total"
+
+        fd_tag = f"  FD: {format_odds(p['fanduel'])} (EV: +{p['fd_ev']:.1f}%)" if p["fd_ev"] > 0 else ""
+        best_tag = ""
+        if p["best_book"] != PRIMARY:
+            best_tag = f"  |  Best: {format_odds(p['best_price'])} {p['best_book'].upper()} (EV: +{p['best_ev']:.1f}%)"
+
+        true_pct = p["true_prob"] * 100
+        print(f"  [{p['sport']}]  {p['matchup']}  {p['time']}")
+        print(f"  {label}")
+        print(f"    True prob: {true_pct:.1f}%  |  {p['books_used']} books{fd_tag}{best_tag}")
+    print()
+
+
+def print_line_moves(moves):
+    if not moves:
+        return
+    divider = "═" * 70
+    print(f"\n{divider}")
+    print(f"  📈  LINE MOVEMENT  (Sharp Money Signals)")
+    print(f"  Lines moved 10+ pts from open — sharp bettors likely involved")
+    print(divider)
+    for m in sorted(moves, key=lambda x: -abs(x["move"])):
+        direction = "↑" if m["move"] > 0 else "↓"
+        sharp_side = "sharps LIKE this team" if m["move"] > 0 else "sharps AGAINST this team"
+        print(f"  [{m['sport']}]  {m['matchup']}  {m['time']}")
+        print(f"  {m['team']}:  Open {format_odds(m['opening'])}  →  Now {format_odds(m['current'])}  "
+              f"({direction}{abs(m['move'])} pts)  —  {sharp_side}")
+    print()
+
+
+def print_report(nba_lines, mlb_lines, nba_totals, mlb_totals, nba_props, mlb_props,
+                 mlb_hr_props=None, ev_ml_nba=None, ev_ml_mlb=None,
+                 ev_tot_nba=None, ev_tot_mlb=None, moves=None, confirmed_lineups=None):
     now = datetime.now(EASTERN).strftime("%A, %B %-d %Y — %-I:%M %p ET")
     divider = "═" * 70
 
@@ -630,11 +895,21 @@ def print_report(nba_lines, mlb_lines, nba_totals, mlb_totals, nba_props, mlb_pr
                 break
         print()
 
-    print_hr_parlay(mlb_hr_props or mlb_props)
+    print_hr_parlay(mlb_hr_props or mlb_props, confirmed_lineups)
+
+    # +EV plays
+    print_ev_section(
+        ev_ml_nba  or [],
+        ev_ml_mlb  or [],
+        ev_tot_nba or [],
+        ev_tot_mlb or [],
+    )
+
+    # Line movement
+    print_line_moves(moves or [])
 
     print(divider)
-    print("  Odds current as of pull time. Verify on FanDuel before placing.")
-    print(f"  Note: Fanatics lines mirror FanDuel (same platform).")
+    print("  Odds current as of pull time. Verify on FanDuel/Fanatics before placing.")
     print(divider + "\n")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -642,24 +917,39 @@ def print_report(nba_lines, mlb_lines, nba_totals, mlb_totals, nba_props, mlb_pr
 def main():
     print("Pulling odds data...")
 
+    # Core odds
     nba_lines = get_moneylines("basketball_nba", "NBA")
     mlb_lines = get_moneylines("baseball_mlb", "MLB")
     nba_totals = get_totals("basketball_nba")
     mlb_totals = get_totals("baseball_mlb")
 
-    nba_prop_markets = [
-        "player_points", "player_rebounds", "player_assists", "player_threes"
-    ]
-    mlb_prop_markets = [
-        "batter_hits", "pitcher_strikeouts", "batter_home_runs", "batter_total_bases"
-    ]
-
+    # Player props
+    nba_prop_markets = ["player_points", "player_rebounds", "player_assists", "player_threes"]
+    mlb_prop_markets = ["batter_hits", "pitcher_strikeouts", "batter_home_runs", "batter_total_bases"]
     nba_props = get_player_props("basketball_nba", nba_prop_markets)
     mlb_props = get_player_props("baseball_mlb", mlb_prop_markets)
-    # HR parlay uses upcoming games + all books (FD/DK/MGM don't always post HR props early)
     mlb_hr_props = get_player_props("baseball_mlb", ["batter_home_runs"], upcoming_only=True, all_books=True)
 
-    print_report(nba_lines, mlb_lines, nba_totals, mlb_totals, nba_props, mlb_props, mlb_hr_props)
+    # Phase 1: +EV
+    print("Calculating +EV plays...")
+    ev_ml_nba  = get_ev_moneylines("basketball_nba", "NBA")
+    ev_ml_mlb  = get_ev_moneylines("baseball_mlb",   "MLB")
+    ev_tot_nba = get_ev_totals("basketball_nba",     "NBA")
+    ev_tot_mlb = get_ev_totals("baseball_mlb",       "MLB")
+
+    # Phase 1: Line movement
+    cache = load_lines_cache()
+    moves = []
+    moves += detect_line_moves(nba_lines, "NBA", cache)
+    moves += detect_line_moves(mlb_lines, "MLB", cache)
+    save_lines_cache(cache)
+
+    # Phase 1: Confirmed lineups for HR parlay
+    print("Checking confirmed lineups...")
+    confirmed_lineups = get_confirmed_lineups()
+
+    print_report(nba_lines, mlb_lines, nba_totals, mlb_totals, nba_props, mlb_props,
+                 mlb_hr_props, ev_ml_nba, ev_ml_mlb, ev_tot_nba, ev_tot_mlb, moves, confirmed_lineups)
 
 if __name__ == "__main__":
     main()
