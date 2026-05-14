@@ -3,7 +3,7 @@ name: Daily Betting Report
 on:
   schedule:
     - cron: "0 13 * * *"   # 9am ET (UTC-4 during EDT)
-  workflow_dispatch:         # allows manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
   run-report:
@@ -16,46 +16,44 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run betting report
-        id: report
-        run: |
-          OUTPUT=$(python3 sports_betting_daily.py)
-          echo "REPORT_OUTPUT<<EOF" >> $GITHUB_OUTPUT
-          echo "$OUTPUT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-        env:
-          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
-
-      - name: Email report via Brevo
+      - name: Run betting report and email via Gmail
         run: |
           python3 - <<'PYEOF'
-          import json, urllib.request, os
+          import smtplib, os
+          from email.mime.multipart import MIMEMultipart
+          from email.mime.text import MIMEText
+          import subprocess
 
-          output = """${{ steps.report.outputs.REPORT_OUTPUT }}"""
-          html = "<pre style='font-family:monospace;font-size:14px;line-height:1.7;background:#0d0d0d;color:#e8e8e8;padding:24px;border-radius:8px'>" + output.replace("<","&lt;").replace(">","&gt;") + "</pre>"
-
-          payload = json.dumps({
-              "sender": {"name": "Betting Report", "email": "shaqr@nychvacpro.com"},
-              "to": [
-                  {"email": "shaqr@nychvacpro.com", "name": "Shaquille"},
-                  {"email": "shaquilleregis23@gmail.com", "name": "Shaquille"}
-              ],
-              "subject": f"Daily Betting Report — NBA + MLB",
-              "htmlContent": html
-          }).encode()
-
-          req = urllib.request.Request(
-              "https://api.brevo.com/v3/smtp/email",
-              data=payload,
-              headers={
-                  "api-key": os.environ["BREVO_API_KEY"],
-                  "Content-Type": "application/json"
-              },
-              method="POST"
+          result = subprocess.run(
+              ["python3", "sports_betting_daily.py"],
+              capture_output=True, text=True
           )
-          resp = urllib.request.urlopen(req)
-          print(f"Email sent: {resp.status}")
+          output = result.stdout
+
+          html = (
+              "<pre style='font-family:monospace;font-size:14px;line-height:1.7;"
+              "background:#0d0d0d;color:#e8e8e8;padding:24px;border-radius:8px'>"
+              + output.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+              + "</pre>"
+          )
+
+          msg = MIMEMultipart("alternative")
+          msg["Subject"] = "Daily Betting Report — NBA + MLB"
+          msg["From"] = "shaquilleregis23@gmail.com"
+          msg["To"] = "shaquilleregis23@gmail.com, shaqr@nychvacpro.com"
+          msg.attach(MIMEText(output, "plain"))
+          msg.attach(MIMEText(html, "html"))
+
+          with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+              smtp.login("shaquilleregis23@gmail.com", os.environ["GMAIL_APP_PASSWORD"])
+              smtp.sendmail(
+                  "shaquilleregis23@gmail.com",
+                  ["shaquilleregis23@gmail.com", "shaqr@nychvacpro.com"],
+                  msg.as_string()
+              )
+          print("Email sent via Gmail.")
           PYEOF
         env:
-          BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
 
