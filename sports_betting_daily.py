@@ -42,6 +42,13 @@ def is_today(iso):
     now = datetime.now(EASTERN)
     return dt.date() == now.date()
 
+def is_upcoming(iso, hours=24):
+    """Games that haven't started yet within the next N hours."""
+    dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(EASTERN)
+    now = datetime.now(EASTERN)
+    from datetime import timedelta
+    return now <= dt <= now + timedelta(hours=hours)
+
 def value_tag(fanduel_odds, best_odds):
     """Flag if another book has better odds than FanDuel."""
     if best_odds > fanduel_odds:
@@ -124,19 +131,23 @@ def get_totals(sport_key):
         totals.append(row)
     return totals
 
-def get_player_props(sport_key, prop_markets):
+def get_player_props(sport_key, prop_markets, upcoming_only=False, all_books=False):
     url = f"{BASE}/sports/{sport_key}/events?apiKey={API_KEY}"
     events = fetch(url)
-    today_events = [e for e in events if is_today(e["commence_time"])]
+    if upcoming_only:
+        today_events = [e for e in events if is_upcoming(e["commence_time"])]
+    else:
+        today_events = [e for e in events if is_today(e["commence_time"])]
 
     all_props = []
     for event in today_events:
         matchup = f"{event['away_team']} @ {event['home_team']}"
         time = game_time(event["commence_time"])
         markets_param = ",".join(prop_markets)
+        books_param = "" if all_books else f"&bookmakers={','.join(BOOKS)}"
         url2 = (f"{BASE}/sports/{sport_key}/events/{event['id']}/odds"
                 f"?apiKey={API_KEY}&regions=us&markets={markets_param}"
-                f"&oddsFormat=american&bookmakers={','.join(BOOKS)}")
+                f"&oddsFormat=american{books_param}")
         try:
             data = fetch(url2)
         except Exception:
@@ -215,6 +226,72 @@ def best_totals_value(totals):
     picks.sort(key=lambda x: -x["best_price"])
     return picks
 
+def american_to_decimal(odds):
+    if odds > 0:
+        return (odds / 100) + 1
+    else:
+        return (100 / abs(odds)) + 1
+
+def build_hr_parlay(mlb_props):
+    """
+    Pick 3-4 best-value HR parlay legs from today's MLB games.
+    Strategy: target Over 0.5 HR props, best odds on FanDuel, one player per game,
+    exclude extreme chalk (<-200) and extreme longshots (>+500).
+    Prefer players in +100 to +300 range — realistic HR threats with value.
+    """
+    candidates = []
+    seen_games = set()
+
+    for game in mlb_props:
+        for prop in game["props"]:
+            if prop["market"] != "batter_home_runs":
+                continue
+            if prop["side"] != "Over":
+                continue
+            if prop["point"] != 0.5:
+                continue
+            if not prop["odds"]:
+                continue
+            best_price = max(prop["odds"].values())
+            best_book = [b for b, o in prop["odds"].items() if o == best_price][0]
+            fd_odds = prop["odds"].get(PRIMARY, best_price)
+            # Target realistic power hitter range: +150 to +500
+            if best_price < 150 or best_price > 500:
+                continue
+            candidates.append({
+                "player": prop["player"],
+                "matchup": game["matchup"],
+                "time": game["time"],
+                "fanduel": fd_odds,
+                "best_price": best_price,
+                "best_book": best_book,
+                "decimal": american_to_decimal(best_price),
+            })
+
+    # One player per game, best odds
+    best_per_game = {}
+    for c in candidates:
+        g = c["matchup"]
+        if g not in best_per_game or c["best_price"] > best_per_game[g]["best_price"]:
+            best_per_game[g] = c
+
+    pool = sorted(best_per_game.values(), key=lambda x: -x["best_price"])
+
+    # Pick 3 or 4 legs — 4 if we have enough options, else 3
+    legs = pool[:4] if len(pool) >= 4 else pool[:3]
+
+    if not legs:
+        return None
+
+    # Calculate combined parlay odds
+    combined_decimal = 1.0
+    for leg in legs:
+        combined_decimal *= leg["decimal"]
+    combined_american = round((combined_decimal - 1) * 100) if combined_decimal >= 2 else round(-100 / (combined_decimal - 1))
+
+    return {"legs": legs, "combined_american": combined_american, "combined_decimal": round(combined_decimal, 2)}
+
+
 def best_props_value(all_props):
     """Find player props with best price on FanDuel or better elsewhere."""
     picks = []
@@ -248,7 +325,33 @@ def best_props_value(all_props):
 
 # ── Formatter ─────────────────────────────────────────────────────────────────
 
-def print_report(nba_lines, mlb_lines, nba_totals, mlb_totals, nba_props, mlb_props):
+def print_hr_parlay(mlb_props):
+    parlay = build_hr_parlay(mlb_props)
+    divider = "═" * 70
+    print(f"\n{divider}")
+    if not parlay:
+        print("  ⚾  TODAY'S HR PARLAY")
+        print(divider)
+        print("  Not enough HR props available today for a parlay.\n")
+        return
+    print(f"  ⚾  TODAY'S HR PARLAY  ({len(parlay['legs'])}-LEG)")
+    print(divider)
+    for i, leg in enumerate(parlay["legs"], 1):
+        tag = ""
+        if leg["best_book"].lower() != PRIMARY and leg["best_price"] > leg["fanduel"]:
+            diff = leg["best_price"] - leg["fanduel"]
+            tag = f"  ← +{diff} on {leg['best_book'].upper()}"
+        print(f"  LEG {i}: {leg['player']}  To Hit HR  (Over 0.5)")
+        print(f"         FD: {format_odds(leg['fanduel'])}  "
+              f"Best: {format_odds(leg['best_price'])} ({leg['best_book'].upper()}){tag}")
+        print(f"         {leg['matchup']}  {leg['time']}")
+    print(f"\n  PARLAY ODDS: {format_odds(parlay['combined_american'])}  "
+          f"({parlay['combined_decimal']}x)")
+    print(f"  $100 wins ${round((parlay['combined_decimal'] - 1) * 100)}")
+    print(divider + "\n")
+
+
+def print_report(nba_lines, mlb_lines, nba_totals, mlb_totals, nba_props, mlb_props, mlb_hr_props=None):
     now = datetime.now(EASTERN).strftime("%A, %B %-d %Y — %-I:%M %p ET")
     divider = "═" * 70
 
@@ -341,6 +444,8 @@ def print_report(nba_lines, mlb_lines, nba_totals, mlb_totals, nba_props, mlb_pr
                 break
         print()
 
+    print_hr_parlay(mlb_hr_props or mlb_props)
+
     print(divider)
     print("  Odds current as of pull time. Verify on FanDuel before placing.")
     print(f"  Note: Fanatics lines mirror FanDuel (same platform).")
@@ -365,8 +470,10 @@ def main():
 
     nba_props = get_player_props("basketball_nba", nba_prop_markets)
     mlb_props = get_player_props("baseball_mlb", mlb_prop_markets)
+    # HR parlay uses upcoming games + all books (FD/DK/MGM don't always post HR props early)
+    mlb_hr_props = get_player_props("baseball_mlb", ["batter_home_runs"], upcoming_only=True, all_books=True)
 
-    print_report(nba_lines, mlb_lines, nba_totals, mlb_totals, nba_props, mlb_props)
+    print_report(nba_lines, mlb_lines, nba_totals, mlb_totals, nba_props, mlb_props, mlb_hr_props)
 
 if __name__ == "__main__":
     main()
