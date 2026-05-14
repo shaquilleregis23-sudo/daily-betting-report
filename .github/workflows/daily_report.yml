@@ -36,7 +36,10 @@ jobs:
 
           payload = json.dumps({
               "sender": {"name": "Betting Report", "email": "shaqr@nychvacpro.com"},
-              "to": [{"email": "shaqr@nychvacpro.com", "name": "Shaquille"}],
+              "to": [
+                  {"email": "shaqr@nychvacpro.com", "name": "Shaquille"},
+                  {"email": "shaquilleregis23@gmail.com", "name": "Shaquille"}
+              ],
               "subject": f"Daily Betting Report — NBA + MLB",
               "htmlContent": html
           }).encode()
