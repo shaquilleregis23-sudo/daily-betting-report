@@ -13,9 +13,45 @@ from zoneinfo import ZoneInfo
 
 API_KEY = "26dcaafb7d69e3ac46d339c733105f90"
 BASE = "https://api.the-odds-api.com/v4"
+MLB_API = "https://statsapi.mlb.com/api/v1"
 BOOKS = ["fanduel", "draftkings", "betmgm"]
 PRIMARY = "fanduel"
 EASTERN = ZoneInfo("America/New_York")
+
+# Park HR factors (above 1.0 = hitter friendly, below = pitcher friendly)
+PARK_FACTORS = {
+    "Colorado Rockies":       1.38,
+    "Cincinnati Reds":        1.26,
+    "Boston Red Sox":         1.22,
+    "New York Yankees":       1.18,
+    "Texas Rangers":          1.15,
+    "Baltimore Orioles":      1.14,
+    "Philadelphia Phillies":  1.12,
+    "Chicago Cubs":           1.10,
+    "Toronto Blue Jays":      1.08,
+    "Atlanta Braves":         1.06,
+    "Milwaukee Brewers":      1.05,
+    "Minnesota Twins":        1.04,
+    "Kansas City Royals":     1.03,
+    "Detroit Tigers":         1.02,
+    "Houston Astros":         1.01,
+    "Cleveland Guardians":    1.00,
+    "St. Louis Cardinals":    0.99,
+    "New York Mets":          0.98,
+    "Pittsburgh Pirates":     0.97,
+    "Chicago White Sox":      0.96,
+    "Washington Nationals":   0.95,
+    "Los Angeles Angels":     0.95,
+    "Los Angeles Dodgers":    0.94,
+    "Arizona Diamondbacks":   0.93,
+    "Tampa Bay Rays":         0.91,
+    "San Diego Padres":       0.90,
+    "Oakland Athletics":      0.90,
+    "Athletics":              0.90,
+    "Seattle Mariners":       0.89,
+    "Miami Marlins":          0.88,
+    "San Francisco Giants":   0.86,
+}
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -73,6 +109,153 @@ def best_odds_across_books(bookmakers, market_key, outcome_name, point=None, des
                         best = o["price"]
                         best_book = bm["title"]
     return best, best_book
+
+# ── MLB Stats API ─────────────────────────────────────────────────────────────
+
+_player_cache = {}
+
+def mlb_fetch(url):
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            return json.loads(r.read())
+    except Exception:
+        return {}
+
+def get_today_probable_pitchers():
+    """Returns {matchup_key: {away_pitcher_id, home_pitcher_id}} for today."""
+    today = datetime.now(EASTERN).strftime("%Y-%m-%d")
+    data = mlb_fetch(f"{MLB_API}/schedule?sportId=1&date={today}&hydrate=probablePitcher,team")
+    games = {}
+    for date in data.get("dates", []):
+        for game in date.get("games", []):
+            away = game["teams"]["away"]["team"]["name"]
+            home = game["teams"]["home"]["team"]["name"]
+            away_p = game["teams"]["away"].get("probablePitcher", {})
+            home_p = game["teams"]["home"].get("probablePitcher", {})
+            games[f"{away}|{home}"] = {
+                "away_pitcher_id": away_p.get("id"),
+                "home_pitcher_id": home_p.get("id"),
+                "home_team": home,
+            }
+    return games
+
+def get_pitcher_hand(pitcher_id):
+    """Returns 'L', 'R', or None."""
+    if not pitcher_id:
+        return None
+    data = mlb_fetch(f"{MLB_API}/people/{pitcher_id}")
+    people = data.get("people", [])
+    if people:
+        return people[0].get("pitchHand", {}).get("code")
+    return None
+
+def get_player_id(name):
+    """Search MLB API for a player ID by name. Cached."""
+    if name in _player_cache:
+        return _player_cache[name]
+    encoded = urllib.parse.quote(name)
+    data = mlb_fetch(f"{MLB_API}/people/search?names={encoded}&sportIds=1")
+    people = data.get("people", [])
+    pid = people[0]["id"] if people else None
+    _player_cache[name] = pid
+    return pid
+
+def get_hitter_profile(player_id):
+    """Returns batting side, season HR/PA rate, last-14-game HRs."""
+    if not player_id:
+        return None
+    # Batting side
+    bio = mlb_fetch(f"{MLB_API}/people/{player_id}")
+    people = bio.get("people", [])
+    bat_side = people[0].get("batSide", {}).get("code", "R") if people else "R"
+
+    # Season stats
+    season_data = mlb_fetch(
+        f"{MLB_API}/people/{player_id}/stats?stats=season&group=hitting&season=2026"
+    )
+    season_splits = season_data.get("stats", [{}])[0].get("splits", [])
+    season = season_splits[0]["stat"] if season_splits else {}
+    hr = int(season.get("homeRuns", 0))
+    pa = int(season.get("plateAppearances", 1)) or 1
+    hr_rate = hr / pa
+
+    # Last 14 games
+    recent_data = mlb_fetch(
+        f"{MLB_API}/people/{player_id}/stats?stats=lastXGames&group=hitting&season=2026&limit=14"
+    )
+    recent_splits = recent_data.get("stats", [{}])[0].get("splits", [])
+    recent = recent_splits[0]["stat"] if recent_splits else {}
+    recent_hr = int(recent.get("homeRuns", 0))
+
+    return {
+        "bat_side": bat_side,
+        "season_hr": hr,
+        "season_pa": pa,
+        "hr_rate": hr_rate,
+        "recent_hr": recent_hr,
+    }
+
+def score_hr_candidate(candidate, pitchers, home_team):
+    """
+    Score a HR candidate using real analytics.
+    Returns (score, reason_string) or (0, reason) if data unavailable.
+    """
+    player_id = get_player_id(candidate["player"])
+    profile = get_hitter_profile(player_id)
+    if not profile:
+        return 0.0, "no MLB data"
+
+    # Find opposing pitcher (is player on away or home team?)
+    matchup_key = None
+    for key in pitchers:
+        away, home = key.split("|")
+        matchup_name = candidate["matchup"]  # "Away @ Home"
+        if home in matchup_name and away in matchup_name:
+            matchup_key = key
+            break
+
+    opp_pitcher_id = None
+    if matchup_key:
+        away_name, home_name = matchup_key.split("|")
+        # Determine if player bats for away or home team
+        matchup_away, matchup_home = candidate["matchup"].split(" @ ")
+        if home_name in matchup_home:
+            opp_pitcher_id = pitchers[matchup_key]["away_pitcher_id"]
+        else:
+            opp_pitcher_id = pitchers[matchup_key]["home_pitcher_id"]
+
+    pitcher_hand = get_pitcher_hand(opp_pitcher_id)
+
+    # Platoon advantage: RHB vs LHP or LHB vs RHP
+    platoon = False
+    if pitcher_hand and profile["bat_side"] != "S":
+        platoon = (profile["bat_side"] == "R" and pitcher_hand == "L") or \
+                  (profile["bat_side"] == "L" and pitcher_hand == "R")
+
+    # Ballpark factor for home team
+    home_team_name = home_team or candidate["matchup"].split(" @ ")[-1]
+    park_factor = PARK_FACTORS.get(home_team_name, 1.0)
+
+    # Composite score
+    score = (
+        profile["hr_rate"] * 100         # HR/PA rate (main driver)
+        + profile["recent_hr"] * 0.12    # recent form bonus
+        + (0.18 if platoon else 0)        # platoon advantage
+    ) * park_factor
+
+    reasons = [
+        f"{profile['season_hr']} HR / {profile['season_pa']} PA this season",
+        f"{profile['recent_hr']} HR last 14G",
+    ]
+    if platoon and pitcher_hand:
+        reasons.append(f"platoon edge ({profile['bat_side']}HB vs {pitcher_hand}HP)")
+    if park_factor >= 1.10:
+        reasons.append(f"HR-friendly park ({park_factor:.2f}x)")
+    elif park_factor <= 0.90:
+        reasons.append(f"pitcher-friendly park ({park_factor:.2f}x)")
+
+    return score, " | ".join(reasons)
+
 
 # ── Sections ─────────────────────────────────────────────────────────────────
 
@@ -234,31 +417,28 @@ def american_to_decimal(odds):
 
 def build_hr_parlay(mlb_props):
     """
-    Pick 3-4 best-value HR parlay legs from today's MLB games.
-    Strategy: target Over 0.5 HR props, best odds on FanDuel, one player per game,
-    exclude extreme chalk (<-200) and extreme longshots (>+500).
-    Prefer players in +100 to +300 range — realistic HR threats with value.
+    Pick 3-4 HR parlay legs using real analytics:
+    - HR/PA rate (season), recent form (last 14G), platoon matchup, ballpark factor
+    - One player per game, odds filtered to +150–+550
     """
-    candidates = []
-    seen_games = set()
+    pitchers = get_today_probable_pitchers()
 
+    # Build candidate pool
+    raw_candidates = []
     for game in mlb_props:
         for prop in game["props"]:
             if prop["market"] != "batter_home_runs":
                 continue
-            if prop["side"] != "Over":
-                continue
-            if prop["point"] != 0.5:
+            if prop["side"] != "Over" or prop["point"] != 0.5:
                 continue
             if not prop["odds"]:
                 continue
             best_price = max(prop["odds"].values())
             best_book = [b for b, o in prop["odds"].items() if o == best_price][0]
             fd_odds = prop["odds"].get(PRIMARY, best_price)
-            # Target realistic power hitter range: +150 to +500
-            if best_price < 150 or best_price > 500:
+            if best_price < 150 or best_price > 550:
                 continue
-            candidates.append({
+            raw_candidates.append({
                 "player": prop["player"],
                 "matchup": game["matchup"],
                 "time": game["time"],
@@ -268,22 +448,26 @@ def build_hr_parlay(mlb_props):
                 "decimal": american_to_decimal(best_price),
             })
 
-    # One player per game, best odds
+    # Score each candidate
+    scored = []
+    for c in raw_candidates:
+        home_team = c["matchup"].split(" @ ")[-1]
+        score, reason = score_hr_candidate(c, pitchers, home_team)
+        scored.append({**c, "score": score, "reason": reason})
+
+    # Best-scoring player per game
     best_per_game = {}
-    for c in candidates:
+    for c in scored:
         g = c["matchup"]
-        if g not in best_per_game or c["best_price"] > best_per_game[g]["best_price"]:
+        if g not in best_per_game or c["score"] > best_per_game[g]["score"]:
             best_per_game[g] = c
 
-    pool = sorted(best_per_game.values(), key=lambda x: -x["best_price"])
-
-    # Pick 3 or 4 legs — 4 if we have enough options, else 3
+    pool = sorted(best_per_game.values(), key=lambda x: -x["score"])
     legs = pool[:4] if len(pool) >= 4 else pool[:3]
 
     if not legs:
         return None
 
-    # Calculate combined parlay odds
     combined_decimal = 1.0
     for leg in legs:
         combined_decimal *= leg["decimal"]
@@ -345,6 +529,8 @@ def print_hr_parlay(mlb_props):
         print(f"         FD: {format_odds(leg['fanduel'])}  "
               f"Best: {format_odds(leg['best_price'])} ({leg['best_book'].upper()}){tag}")
         print(f"         {leg['matchup']}  {leg['time']}")
+        if leg.get("reason"):
+            print(f"         WHY: {leg['reason']}")
     print(f"\n  PARLAY ODDS: {format_odds(parlay['combined_american'])}  "
           f"({parlay['combined_decimal']}x)")
     print(f"  $100 wins ${round((parlay['combined_decimal'] - 1) * 100)}")
