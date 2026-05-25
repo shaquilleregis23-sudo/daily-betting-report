@@ -1,0 +1,53 @@
+# GitHub Actions workflow — runs daily at 9:05am ET (after odds script)
+# Copy this file to: .github/workflows/daily_model.yml in your repo
+#
+# Required GitHub repo secrets:
+#   (none — ESPN odds API is free, no key needed)
+#
+# The workflow:
+#   1. Fetches today's odds from ESPN (free, no key)
+#   2. Runs the ML model to generate picks
+#   3. Commits picks_today.json + picks_log.json back to the repo
+#   4. Streamlit Cloud detects the commit and auto-refreshes the app
+
+name: Daily Model Picks
+
+on:
+  schedule:
+    # 9:05am ET = 13:05 UTC (offset 5 min from main odds script)
+    - cron: "5 13 * * *"
+  workflow_dispatch:  # allows manual trigger from GitHub UI
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to commit JSON back to repo
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: model/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r model/requirements.txt
+
+      - name: Fetch today's odds (ESPN)
+        run: python3 model/2_fetch_odds_espn.py
+
+      - name: Generate model picks
+        run: python3 model/6_predict_today.py
+
+      - name: Commit picks JSON to repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add model/picks_today.json model/picks_log.json lines_cache.json || true
+          git diff --staged --quiet || git commit -m "chore: daily picks $(date -u +%Y-%m-%d)"
+          git push

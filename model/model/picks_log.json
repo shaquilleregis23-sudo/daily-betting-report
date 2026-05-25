@@ -1,0 +1,92 @@
+[
+  {
+    "date": "2026-05-25",
+    "sport": "MLB",
+    "matchup": "Cincinnati Reds @ New York Mets",
+    "bet_team": "New York Mets",
+    "ml": -143,
+    "edge": 0.1485,
+    "edge_pct": "+14.8%",
+    "result": null
+  },
+  {
+    "date": "2026-05-25",
+    "sport": "MLB",
+    "matchup": "Tampa Bay Rays @ Baltimore Orioles",
+    "bet_team": "Baltimore Orioles",
+    "ml": -115,
+    "edge": 0.1067,
+    "edge_pct": "+10.7%",
+    "result": null
+  },
+  {
+    "date": "2026-05-25",
+    "sport": "MLB",
+    "matchup": "Minnesota Twins @ Chicago White Sox",
+    "bet_team": "Chicago White Sox",
+    "ml": -112,
+    "edge": 0.0865,
+    "edge_pct": "+8.7%",
+    "result": null
+  },
+  {
+    "date": "2026-05-25",
+    "sport": "MLB",
+    "matchup": "Washington Nationals @ Cleveland Guardians",
+    "bet_team": "Cleveland Guardians",
+    "ml": -175,
+    "edge": 0.0774,
+    "edge_pct": "+7.7%",
+    "result": null
+  },
+  {
+    "date": "2026-05-25",
+    "sport": "MLB",
+    "matchup": "Seattle Mariners @ Athletics",
+    "bet_team": "Athletics",
+    "ml": -105,
+    "edge": 0.0759,
+    "edge_pct": "+7.6%",
+    "result": null
+  },
+  {
+    "date": "2026-05-25",
+    "sport": "MLB",
+    "matchup": "Houston Astros @ Texas Rangers",
+    "bet_team": "Houston Astros",
+    "ml": 104,
+    "edge": 0.0586,
+    "edge_pct": "+5.9%",
+    "result": null
+  },
+  {
+    "date": "2026-05-25",
+    "sport": "MLB",
+    "matchup": "Philadelphia Phillies @ San Diego Padres",
+    "bet_team": "San Diego Padres",
+    "ml": -102,
+    "edge": 0.0583,
+    "edge_pct": "+5.8%",
+    "result": null
+  },
+  {
+    "date": "2026-05-25",
+    "sport": "MLB",
+    "matchup": "St. Louis Cardinals @ Milwaukee Brewers",
+    "bet_team": "Milwaukee Brewers",
+    "ml": -225,
+    "edge": 0.0511,
+    "edge_pct": "+5.1%",
+    "result": null
+  },
+  {
+    "date": "2026-05-25",
+    "sport": "MLB",
+    "matchup": "Arizona Diamondbacks @ San Francisco Giants",
+    "bet_team": "San Francisco Giants",
+    "ml": -132,
+    "edge": 0.04,
+    "edge_pct": "+4.0%",
+    "result": null
+  }
+]
