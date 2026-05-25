@@ -40,15 +40,20 @@ echo "Sending email..."
 /usr/bin/python3 - <<'PYEOF'
 import json
 import os
+import sys
 import urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+if not os.environ.get("BREVO_API_KEY"):
+    print("❌ BREVO_API_KEY not set. Add to ~/.zshrc: export BREVO_API_KEY=your_key")
+    sys.exit(1)
 
 EASTERN = ZoneInfo("America/New_York")
 today   = datetime.now(EASTERN).strftime("%A, %B %-d")
 MODEL   = "/Users/shaquilleregis/Documents/model"
 
-API_KEY = "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"
+API_KEY = os.environ.get("BREVO_API_KEY", "")
 
 def read(path, fallback=""):
     try:
