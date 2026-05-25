@@ -38,6 +38,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r model/requirements.txt
 
+      - name: Mark yesterday's results
+        run: python3 model/7_mark_results.py
+
       - name: Fetch today's odds (ESPN)
         run: python3 model/2_fetch_odds_espn.py
 
