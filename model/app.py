@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-model/app.py — Sports Edge Dashboard
-Deploy: streamlit run model/app.py
+model/app.py — Sports Edge Dashboard  [v2 — upgraded]
+
+UPGRADES:
+  - Kelly stake shown on every pick card
+  - CLV (Closing Line Value) column in Performance tab
+  - Avg CLV metric in performance summary
+  - Starter / weather / batting context in Odds Board
+  - Auto-result status (no manual JSON download needed once 7_mark_results.py runs)
 """
 
 import json
@@ -25,7 +31,7 @@ PICKS_FILE = os.path.join(BASE_DIR, "picks_today.json")
 LOG_FILE   = os.path.join(BASE_DIR, "picks_log.json")
 EASTERN    = ZoneInfo("America/New_York")
 
-# ── Minimal dark-friendly CSS ──────────────────────────────────────────────────
+# ── CSS ────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 .pick-card {
@@ -34,11 +40,14 @@ st.markdown("""
     margin: 8px 0 14px 0;
     font-family: sans-serif;
 }
-.pick-sport { font-size: 0.75em; font-weight: bold; letter-spacing: 1px; opacity: 0.7; }
-.pick-game  { font-size: 0.9em; opacity: 0.7; margin: 2px 0; }
-.pick-bet   { font-size: 1.25em; font-weight: bold; margin: 6px 0; }
-.pick-edge  { font-size: 1.05em; font-weight: bold; }
-.pick-probs { font-size: 0.85em; opacity: 0.75; margin-top: 6px; }
+.pick-sport  { font-size: 0.75em; font-weight: bold; letter-spacing: 1px; opacity: 0.7; }
+.pick-game   { font-size: 0.9em; opacity: 0.7; margin: 2px 0; }
+.pick-bet    { font-size: 1.25em; font-weight: bold; margin: 6px 0; }
+.pick-edge   { font-size: 1.05em; font-weight: bold; }
+.pick-probs  { font-size: 0.85em; opacity: 0.75; margin-top: 4px; }
+.pick-kelly  { font-size: 0.85em; opacity: 0.85; margin-top: 3px; }
+.clv-positive { color: #4ecca3; font-weight: bold; }
+.clv-negative { color: #ff6b35; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -71,55 +80,60 @@ def save_log(log):
 st.title("🎯 Sports Edge")
 
 picks_data = load_picks()
-today_date = datetime.now(EASTERN).strftime("%B %d, %Y")
+today_date = datetime.now(EASTERN).strftime("%Y-%m-%d")
 
 if picks_data:
     gen = picks_data.get("generated_at", "")[:16].replace("T", " ")
-    st.caption(f"{picks_data.get('date', today_date)}  ·  Updated {gen} ET")
+    st.caption(f"{picks_data.get('date', today_date)} · Updated {gen} ET")
 else:
-    st.caption(f"{today_date}  ·  No picks file yet — run 6_predict_today.py")
+    st.caption(f"{today_date} · No picks file yet — run 6_predict_today.py")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3 = st.tabs(["🎯 Today's Picks", "📊 Performance", "📋 Odds Board"])
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — TODAY'S PICKS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab1:
     if not picks_data:
-        st.warning("No picks file found. Run `python3 model/6_predict_today.py` to generate picks.")
+        st.warning("No picks file found. Run `python3 model/6_predict_today.py`.")
         st.stop()
 
-    picks = picks_data.get("picks", [])
+    picks   = picks_data.get("picks", [])
     summary = picks_data.get("summary", {})
 
     if not picks:
         st.info("No edges found today — model agrees with the market on all games.")
     else:
-        # ── Summary strip ──────────────────────────────────────────────────────
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Picks", summary.get("total_picks", len(picks)))
-        c2.metric("MLB", summary.get("mlb_picks", 0))
-        c3.metric("NBA", summary.get("nba_picks", 0))
-        top_edge = max(p["edge"] for p in picks) if picks else 0
-        c4.metric("Top Edge", f"+{top_edge:.1%}")
+        # ── Summary strip ──────────────────────────────────────────────
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Picks",    summary.get("total_picks", len(picks)))
+        c2.metric("MLB",      summary.get("mlb_picks",   0))
+        c3.metric("NBA",      summary.get("nba_picks",   0))
+        top_edge  = max(p["edge"] for p in picks) if picks else 0
+        top_kelly = max(p.get("kelly_fraction", 0) for p in picks) if picks else 0
+        c4.metric("Top Edge",  f"+{top_edge:.1%}")
+        c5.metric("Top Kelly", f"{top_kelly:.1%}")
 
         st.divider()
 
-        # ── Pick cards ─────────────────────────────────────────────────────────
+        # ── Pick cards ─────────────────────────────────────────────────
         for pick in picks:
             edge = pick["edge"]
 
             if edge >= 0.08:
-                color  = "#ff6b35"
-                emoji  = "🔥🔥"
+                color = "#ff6b35"
+                emoji = "🔥🔥"
             elif edge >= 0.05:
-                color  = "#4ecca3"
-                emoji  = "✅"
+                color = "#4ecca3"
+                emoji = "✅"
             else:
-                color  = "#7ec8e3"
-                emoji  = "📈"
+                color = "#7ec8e3"
+                emoji = "📈"
+
+            kelly     = pick.get("kelly_fraction", 0)
+            kelly_pct = pick.get("kelly_pct", f"{kelly:.1%}")
+            rec_units = pick.get("rec_units_per_1k", round(kelly * 10, 2))
 
             st.markdown(f"""
 <div class="pick-card" style="border-left: 5px solid {color}; background: rgba(255,255,255,0.04)">
@@ -132,31 +146,31 @@ with tab1:
     &nbsp;|&nbsp;
     Market: <strong>{pick['market_p']}</strong>
   </div>
+  <div class="pick-kelly" style="color:{color}">
+    💰 Kelly: <strong>{kelly_pct}</strong> of bankroll &nbsp;·&nbsp; ~{rec_units} units per $1,000
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
-            # Confidence meter (bar from 50% baseline to 100%)
-            conf = pick["model_prob"]
+            conf    = pick["model_prob"]
             bar_val = max(0.0, min(1.0, (conf - 0.5) * 2))
             st.progress(bar_val, text=f"Model confidence: {conf:.1%}")
 
-
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — PERFORMANCE TRACKER
+# TAB 2 — PERFORMANCE TRACKER  (with CLV)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab2:
     log = load_log()
 
     if not log:
-        st.info("No bet history yet. Picks are logged automatically each time you run 6_predict_today.py.")
+        st.info("No bet history yet. Picks are logged automatically each run.")
     else:
         df = pd.DataFrame(log)
 
-        # Separate resolved vs pending
         resolved = df[df["result"].isin(["W", "L"])].copy()
         pending  = df[~df["result"].isin(["W", "L"])].copy()
 
-        # ── Stats ──────────────────────────────────────────────────────────────
+        # ── Stats ──────────────────────────────────────────────────────
         if len(resolved) > 0:
             wins   = (resolved["result"] == "W").sum()
             losses = (resolved["result"] == "L").sum()
@@ -172,70 +186,123 @@ with tab2:
             net_units = resolved["pnl"].sum()
             roi       = net_units / len(resolved) * 100
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Win Rate",  f"{wr:.1%}",   f"{wins}W–{losses}L")
+            # ── CLV calculation ────────────────────────────────────────
+            # CLV = closing_market_prob - opening_market_prob
+            # Positive CLV = we got better number than close (good)
+            has_clv = resolved["clv"].notna() if "clv" in resolved.columns else pd.Series([False] * len(resolved))
+            avg_clv = resolved.loc[has_clv, "clv"].mean() if has_clv.any() else None
+
+            # If no closing line stored yet, use edge as CLV proxy
+            if avg_clv is None and "edge" in resolved.columns:
+                avg_clv_proxy = resolved["edge"].mean()
+                clv_label     = f"{avg_clv_proxy:+.1%} (edge proxy)"
+                clv_help      = "True CLV requires closing odds. Showing avg model edge as proxy."
+            else:
+                clv_label = f"{avg_clv:+.1%}" if avg_clv is not None else "N/A"
+                clv_help  = "Avg closing line value. Positive = consistently beat the close."
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Win Rate",  f"{wr:.1%}", f"{wins}W–{losses}L")
             c2.metric("ROI",       f"{roi:+.1f}%")
             c3.metric("Net Units", f"{net_units:+.2f}")
             c4.metric("Resolved",  len(resolved))
+            c5.metric("Avg CLV",   clv_label, help=clv_help)
 
-            # By sport
+            # ── By sport ───────────────────────────────────────────────
             st.divider()
             st.subheader("By Sport")
             for sport in sorted(resolved["sport"].unique()):
-                sdf = resolved[resolved["sport"] == sport]
-                sw  = (sdf["result"] == "W").sum()
-                sl  = (sdf["result"] == "L").sum()
-                spl = sdf["pnl"].sum()
-                swr = sw / len(sdf)
-                st.markdown(f"**{sport}** &nbsp; {sw}W–{sl}L &nbsp; ({swr:.1%}) &nbsp; {spl:+.2f} units")
+                sdf  = resolved[resolved["sport"] == sport]
+                sw   = (sdf["result"] == "W").sum()
+                sl   = (sdf["result"] == "L").sum()
+                spl  = sdf["pnl"].sum()
+                swr  = sw / len(sdf)
+                st.markdown(
+                    f"**{sport}** &nbsp; {sw}W–{sl}L "
+                    f"&nbsp; ({swr:.1%}) &nbsp; {spl:+.2f} units"
+                )
 
-            # History table
+            # ── Bet history with CLV ───────────────────────────────────
             st.divider()
             st.subheader("Bet History")
-            show = resolved[["date","sport","matchup","bet_team","ml","edge_pct","result","pnl"]].copy()
+
+            show_cols = ["date", "sport", "matchup", "bet_team", "ml",
+                         "edge_pct", "result", "pnl"]
+
+            # Add CLV column if available
+            if "clv" in resolved.columns and resolved["clv"].notna().any():
+                show_cols.insert(6, "clv")
+                resolved["clv_fmt"] = resolved["clv"].apply(
+                    lambda x: f"{x:+.1%}" if pd.notna(x) else "—"
+                )
+
+            show = resolved[show_cols].copy()
             show = show.rename(columns={
-                "date": "Date", "sport": "Sport", "matchup": "Game",
-                "bet_team": "Bet", "ml": "ML", "edge_pct": "Edge",
-                "result": "Result", "pnl": "Units",
+                "date":     "Date",
+                "sport":    "Sport",
+                "matchup":  "Game",
+                "bet_team": "Bet",
+                "ml":       "ML",
+                "edge_pct": "Edge",
+                "result":   "Result",
+                "pnl":      "Units",
+                "clv":      "CLV",
             }).sort_values("Date", ascending=False)
             show["Units"] = show["Units"].apply(lambda x: f"{x:+.2f}")
+            if "CLV" in show.columns:
+                show["CLV"] = show["CLV"].apply(
+                    lambda x: f"{x:+.1%}" if isinstance(x, float) else "—"
+                )
             st.dataframe(show, hide_index=True, use_container_width=True)
-        else:
-            st.info("No resolved bets yet. Mark your results below.")
 
-        # ── Pending results ────────────────────────────────────────────────────
+            # ── CLV explanation callout ────────────────────────────────
+            with st.expander("What is CLV? Why does it matter?"):
+                st.markdown("""
+**Closing Line Value (CLV)** measures whether your bets were placed at better odds than where the market settled at game time.
+
+- **Positive CLV** = you got a better number than the closing price → your model is identifying edge the market later agrees with
+- **Negative CLV** = the market moved against you → could indicate noise, not real edge
+
+Sharp bettors consistently show positive CLV even on losing bets. It's a better long-term signal than win rate alone.
+
+CLV here = `opening_market_prob (your bet time) − closing_market_prob`. Closing odds are fetched automatically by `7_mark_results.py`.
+""")
+        else:
+            st.info("No resolved bets yet. Results auto-update after each game via `7_mark_results.py`.")
+
+        # ── Pending results ────────────────────────────────────────────
         if len(pending) > 0:
             st.divider()
-            st.subheader(f"Mark Results ({len(pending)} pending)")
-            st.caption("Check the Result column, then download and commit picks_log.json to save permanently.")
+            st.subheader(f"Pending ({len(pending)} bets)")
+            st.caption(
+                "Results are marked automatically by `7_mark_results.py` "
+                "which runs via GitHub Actions each morning."
+            )
 
-            # Editable table — user sets result column
-            editable = pending[["date","sport","matchup","bet_team","ml","edge_pct","result"]].copy()
+            editable = pending[["date", "sport", "matchup",
+                                 "bet_team", "ml", "edge_pct", "result"]].copy()
             editable["result"] = editable["result"].fillna("")
 
             edited = st.data_editor(
                 editable,
                 column_config={
-                    "result": st.column_config.SelectboxColumn(
-                        "Result",
-                        options=["", "W", "L"],
-                        required=False,
-                    ),
-                    "date":      st.column_config.TextColumn("Date", disabled=True),
-                    "sport":     st.column_config.TextColumn("Sport", disabled=True),
-                    "matchup":   st.column_config.TextColumn("Game", disabled=True),
-                    "bet_team":  st.column_config.TextColumn("Bet", disabled=True),
-                    "ml":        st.column_config.NumberColumn("ML", disabled=True),
-                    "edge_pct":  st.column_config.TextColumn("Edge", disabled=True),
+                    "result":   st.column_config.SelectboxColumn(
+                                    "Result", options=["", "W", "L"], required=False),
+                    "date":     st.column_config.TextColumn("Date",  disabled=True),
+                    "sport":    st.column_config.TextColumn("Sport", disabled=True),
+                    "matchup":  st.column_config.TextColumn("Game",  disabled=True),
+                    "bet_team": st.column_config.TextColumn("Bet",   disabled=True),
+                    "ml":       st.column_config.NumberColumn("ML",  disabled=True),
+                    "edge_pct": st.column_config.TextColumn("Edge",  disabled=True),
                 },
                 hide_index=True,
                 use_container_width=True,
             )
 
-            # Merge edits back into full log and offer download
-            updated_log = log.copy()
-            pending_indices = pending.index.tolist()
-            for i, (orig_idx, edit_row) in enumerate(zip(pending_indices, edited.itertuples())):
+            # Merge manual edits back
+            updated_log  = log.copy()
+            pending_idxs = pending.index.tolist()
+            for orig_idx, edit_row in zip(pending_idxs, edited.itertuples()):
                 result_val = edit_row.result if edit_row.result in ("W", "L") else None
                 updated_log[orig_idx]["result"] = result_val
 
@@ -244,14 +311,11 @@ with tab2:
                 data=json.dumps(updated_log, indent=2),
                 file_name="picks_log.json",
                 mime="application/json",
-                help="Download, then replace model/picks_log.json in your GitHub repo to save results permanently.",
+                help="Manual override — only needed if auto-marking fails.",
             )
 
-            st.caption("After downloading: go to your GitHub repo → model/picks_log.json → edit (pencil icon) → paste contents → commit.")
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — ODDS BOARD
+# TAB 3 — ODDS BOARD  (with starter + weather + batting context)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab3:
     if not picks_data:
@@ -260,7 +324,7 @@ with tab3:
         all_games = picks_data.get("all_games", [])
 
         if not all_games:
-            st.info("No games data. Run 2_fetch_odds_espn.py then 6_predict_today.py.")
+            st.info("No games data. Run 6_predict_today.py.")
         else:
             df = pd.DataFrame(all_games)
 
@@ -270,12 +334,11 @@ with tab3:
             if sport_filter != "All":
                 df = df[df["sport"] == sport_filter].copy()
 
-            # Derive display columns
-            df["Model"] = df["model_prob"].apply(lambda x: f"{x:.1%}")
-            df["Market"] = df["market_prob"].apply(lambda x: f"{x:.1%}")
+            df["Model"]   = df["model_prob"].apply(lambda x: f"{x:.1%}")
+            df["Market"]  = df["market_prob"].apply(lambda x: f"{x:.1%}")
 
             def edge_display(row):
-                e = row["edge"]  # positive = home edge, negative = away edge
+                e = row["edge"]
                 if abs(e) < 0.01:
                     return "—"
                 direction = "H" if e > 0 else "A"
@@ -283,20 +346,64 @@ with tab3:
 
             df["Edge"] = df.apply(edge_display, axis=1)
             df["Pick"] = df["has_pick"].apply(lambda x: "⭐" if x else "")
+
             df["Home ML"] = df["home_ml"].apply(lambda x: f"+{x}" if x >= 0 else str(x))
             df["Away ML"] = df["away_ml"].apply(lambda x: f"+{x}" if x >= 0 else str(x))
 
-            # Sort: picks first, then by abs edge
             df["abs_edge"] = df["edge"].abs()
             df = df.sort_values(["has_pick", "abs_edge"], ascending=[False, False])
 
-            display = df[["Pick", "sport", "matchup", "Away ML", "Home ML", "Model", "Market", "Edge"]].rename(
+            # ── Main table ─────────────────────────────────────────────
+            display_cols = ["Pick", "sport", "matchup", "Away ML",
+                            "Home ML", "Model", "Market", "Edge"]
+            display = df[display_cols].rename(
                 columns={"sport": "Sport", "matchup": "Game"}
             )
-
             st.dataframe(display, hide_index=True, use_container_width=True)
 
+            # ── Extra context table (starters, batting, weather) ───────
+            has_extras = any(
+                col in df.columns
+                for col in ["home_starter", "home_obp", "wind_speed"]
+            )
+
+            if has_extras and sport_filter in ("All", "MLB"):
+                st.divider()
+                st.subheader("MLB Context")
+
+                mlb_df = df[df["sport"] == "MLB"].copy() if "sport" in df.columns else df.copy()
+
+                context_rows = []
+                for _, row in mlb_df.iterrows():
+                    ctx = {"Game": row.get("matchup", "")}
+                    if "home_starter" in row:
+                        ctx["Home SP"] = row.get("home_starter", "TBD")
+                        ctx["Away SP"] = row.get("away_starter", "TBD")
+                    if "home_sp_era" in row or "home_era" in row:
+                        h_era = row.get("home_sp_era") or row.get("home_era")
+                        a_era = row.get("away_sp_era") or row.get("away_era")
+                        ctx["Home ERA"] = f"{h_era:.2f}" if h_era else "—"
+                        ctx["Away ERA"] = f"{a_era:.2f}" if a_era else "—"
+                    if "home_obp" in row and row.get("home_obp"):
+                        ctx["Home OBP"] = f"{row['home_obp']:.3f}"
+                        ctx["Away OBP"] = f"{row.get('away_obp', 0):.3f}"
+                    if "wind_speed" in row:
+                        wind = row.get("wind_speed", 0)
+                        temp = row.get("temp_f", 72)
+                        ctx["Wind (mph)"] = int(wind) if wind else "Dome"
+                        ctx["Temp (°F)"]  = int(temp)
+                    context_rows.append(ctx)
+
+                if context_rows:
+                    ctx_df = pd.DataFrame(context_rows)
+                    st.dataframe(ctx_df, hide_index=True, use_container_width=True)
+                    st.caption(
+                        "ERA = season ERA from MLB Stats API. "
+                        "OBP = team on-base percentage. "
+                        "Wind/Temp = game-time conditions at stadium."
+                    )
+
             st.caption(
-                "Edge direction: H = home team has edge, A = away team has edge. "
-                "⭐ = model generated a pick on this game."
+                "Edge: H = home team has model edge, A = away. "
+                "⭐ = pick generated on this game."
             )
