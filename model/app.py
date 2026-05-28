@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """
-model/app.py — Sports Edge Dashboard
-Deploy: streamlit run model/app.py
+model/app.py — Sports Edge Dashboard  [v2 — upgraded]
+
+UPGRADES:
+  - Kelly stake shown on every pick card
+  - CLV (Closing Line Value) column in Performance tab
+  - Avg CLV metric in performance summary
+  - Starter / weather / batting context in Odds Board
+  - Auto-result status (no manual JSON download needed once 7_mark_results.py runs)
 """
 
 import json
@@ -25,7 +31,7 @@ PICKS_FILE = os.path.join(BASE_DIR, "picks_today.json")
 LOG_FILE   = os.path.join(BASE_DIR, "picks_log.json")
 EASTERN    = ZoneInfo("America/New_York")
 
-# ── Minimal dark-friendly CSS ──────────────────────────────────────────────────
+# ── CSS ────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 .pick-card {
@@ -74,27 +80,26 @@ def save_log(log):
 st.title("🎯 Sports Edge")
 
 picks_data = load_picks()
-today_date = datetime.now(EASTERN).strftime("%B %d, %Y")
+today_date = datetime.now(EASTERN).strftime("%Y-%m-%d")
 
 if picks_data:
     gen = picks_data.get("generated_at", "")[:16].replace("T", " ")
-    st.caption(f"{picks_data.get('date', today_date)}  ·  Updated {gen} ET")
+    st.caption(f"{picks_data.get('date', today_date)} · Updated {gen} ET")
 else:
-    st.caption(f"{today_date}  ·  No picks file yet — run 6_predict_today.py")
+    st.caption(f"{today_date} · No picks file yet — run 6_predict_today.py")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3 = st.tabs(["🎯 Today's Picks", "📊 Performance", "📋 Odds Board"])
-
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — TODAY'S PICKS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab1:
     if not picks_data:
-        st.warning("No picks file found. Run `python3 model/6_predict_today.py` to generate picks.")
+        st.warning("No picks file found. Run `python3 model/6_predict_today.py`.")
         st.stop()
 
-    picks = picks_data.get("picks", [])
+    picks   = picks_data.get("picks", [])
     summary = picks_data.get("summary", {})
 
     if not picks:
@@ -112,7 +117,7 @@ with tab1:
 
         st.divider()
 
-        # ── Pick cards ─────────────────────────────────────────────────────────
+        # ── Pick cards ─────────────────────────────────────────────────
         for pick in picks:
             edge  = pick["edge"]
             grade = pick.get("grade", "")
@@ -162,8 +167,7 @@ with tab1:
 </div>
 """, unsafe_allow_html=True)
 
-            # Confidence meter (bar from 50% baseline to 100%)
-            conf = pick["model_prob"]
+            conf    = pick["model_prob"]
             bar_val = max(0.0, min(1.0, (conf - 0.5) * 2))
             st.progress(bar_val, text=f"Model confidence: {conf:.1%}")
 
@@ -220,14 +224,14 @@ with tab2:
     log = load_log()
 
     if not log:
-        st.info("No bet history yet. Picks are logged automatically each time you run 6_predict_today.py.")
+        st.info("No bet history yet. Picks are logged automatically each run.")
     else:
         df = pd.DataFrame(log)
 
         resolved = df[df["result"].isin(["W", "L"])].copy()
         pending  = df[~df["result"].isin(["W", "L"])].copy()
 
-        # ── Stats ──────────────────────────────────────────────────────────────
+        # ── Stats ──────────────────────────────────────────────────────
         if len(resolved) > 0:
             wins   = (resolved["result"] == "W").sum()
             losses = (resolved["result"] == "L").sum()
@@ -262,16 +266,19 @@ with tab2:
             c4.metric("Resolved",  len(resolved))
             c5.metric("Avg CLV",   clv_label, help=clv_help)
 
-            # By sport
+            # ── By sport ───────────────────────────────────────────────
             st.divider()
             st.subheader("By Sport")
             for sport in sorted(resolved["sport"].unique()):
-                sdf = resolved[resolved["sport"] == sport]
-                sw  = (sdf["result"] == "W").sum()
-                sl  = (sdf["result"] == "L").sum()
-                spl = sdf["pnl"].sum()
-                swr = sw / len(sdf)
-                st.markdown(f"**{sport}** &nbsp; {sw}W–{sl}L &nbsp; ({swr:.1%}) &nbsp; {spl:+.2f} units")
+                sdf  = resolved[resolved["sport"] == sport]
+                sw   = (sdf["result"] == "W").sum()
+                sl   = (sdf["result"] == "L").sum()
+                spl  = sdf["pnl"].sum()
+                swr  = sw / len(sdf)
+                st.markdown(
+                    f"**{sport}** &nbsp; {sw}W–{sl}L "
+                    f"&nbsp; ({swr:.1%}) &nbsp; {spl:+.2f} units"
+                )
 
             # History table with optional CLV column
             st.divider()
@@ -304,7 +311,22 @@ Sharp bettors consistently show positive CLV even on losing bets. It's a better 
         else:
             st.info("No resolved bets yet. Mark your results below.")
 
-        # ── Pending results ────────────────────────────────────────────────────
+            # ── CLV explanation callout ────────────────────────────────
+            with st.expander("What is CLV? Why does it matter?"):
+                st.markdown("""
+**Closing Line Value (CLV)** measures whether your bets were placed at better odds than where the market settled at game time.
+
+- **Positive CLV** = you got a better number than the closing price → your model is identifying edge the market later agrees with
+- **Negative CLV** = the market moved against you → could indicate noise, not real edge
+
+Sharp bettors consistently show positive CLV even on losing bets. It's a better long-term signal than win rate alone.
+
+CLV here = `opening_market_prob (your bet time) − closing_market_prob`. Closing odds are fetched automatically by `7_mark_results.py`.
+""")
+        else:
+            st.info("No resolved bets yet. Results auto-update after each game via `7_mark_results.py`.")
+
+        # ── Pending results ────────────────────────────────────────────
         if len(pending) > 0:
             st.divider()
             st.subheader(f"Mark Results ({len(pending)} pending)")
@@ -347,7 +369,7 @@ Sharp bettors consistently show positive CLV even on losing bets. It's a better 
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — ODDS BOARD
+# TAB 3 — ODDS BOARD  (with starter + weather + batting context)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab3:
     if not picks_data:
@@ -356,7 +378,7 @@ with tab3:
         all_games = picks_data.get("all_games", [])
 
         if not all_games:
-            st.info("No games data. Run 2_fetch_odds_espn.py then 6_predict_today.py.")
+            st.info("No games data. Run 6_predict_today.py.")
         else:
             df = pd.DataFrame(all_games)
 
@@ -366,12 +388,11 @@ with tab3:
             if sport_filter != "All":
                 df = df[df["sport"] == sport_filter].copy()
 
-            # Derive display columns
-            df["Model"] = df["model_prob"].apply(lambda x: f"{x:.1%}")
-            df["Market"] = df["market_prob"].apply(lambda x: f"{x:.1%}")
+            df["Model"]   = df["model_prob"].apply(lambda x: f"{x:.1%}")
+            df["Market"]  = df["market_prob"].apply(lambda x: f"{x:.1%}")
 
             def edge_display(row):
-                e = row["edge"]  # positive = home edge, negative = away edge
+                e = row["edge"]
                 if abs(e) < 0.01:
                     return "—"
                 direction = "H" if e > 0 else "A"
@@ -379,17 +400,19 @@ with tab3:
 
             df["Edge"] = df.apply(edge_display, axis=1)
             df["Pick"] = df["has_pick"].apply(lambda x: "⭐" if x else "")
+
             df["Home ML"] = df["home_ml"].apply(lambda x: f"+{x}" if x >= 0 else str(x))
             df["Away ML"] = df["away_ml"].apply(lambda x: f"+{x}" if x >= 0 else str(x))
 
-            # Sort: picks first, then by abs edge
             df["abs_edge"] = df["edge"].abs()
             df = df.sort_values(["has_pick", "abs_edge"], ascending=[False, False])
 
-            display = df[["Pick", "sport", "matchup", "Away ML", "Home ML", "Model", "Market", "Edge"]].rename(
+            # ── Main table ─────────────────────────────────────────────
+            display_cols = ["Pick", "sport", "matchup", "Away ML",
+                            "Home ML", "Model", "Market", "Edge"]
+            display = df[display_cols].rename(
                 columns={"sport": "Sport", "matchup": "Game"}
             )
-
             st.dataframe(display, hide_index=True, use_container_width=True)
 
             # ── Extra context table (starters, batting, weather) ───────────────
