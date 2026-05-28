@@ -1,29 +1,30 @@
-# GitHub Actions workflow — runs daily at 9:05am ET (after odds script)
-# Copy this file to: .github/workflows/daily_model.yml in your repo
+# GitHub Actions workflow — runs daily at 12:00am ET (5:00 UTC)
 #
 # Required GitHub repo secrets:
 #   (none — ESPN odds API is free, no key needed)
 #
 # The workflow:
-#   0. Updates game database (fetches completed games since last run)
-#   1. Fetches today's odds from ESPN (free, no key)
-#   2. Runs the ML model to generate picks
-#   3. Commits picks_today.json + picks_log.json back to the repo
-#   4. Streamlit Cloud detects the commit and auto-refreshes the app
+#   0. Updates game database (yesterday's final scores)
+#   1. Marks yesterday's picks W/L
+#   2. Fetches today's odds from ESPN (free, no key)
+#   3. Runs the ML model → picks_today.json + picks_today.txt
+#   4. Generates docs/index.html cheatsheet (served by GitHub Pages)
+#   5. Commits all outputs back to the repo
+#   Streamlit Cloud detects the commit and auto-refreshes the app
 
 name: Daily Model Picks
 
 on:
   schedule:
-    # 9:05am ET = 13:05 UTC (offset 5 min from main odds script)
-    - cron: "5 13 * * *"
+    # 12:00am ET = 5:00 UTC  (ESPN posts next-day odds by midnight)
+    - cron: "0 5 * * *"
   workflow_dispatch:  # allows manual trigger from GitHub UI
 
 jobs:
   predict:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # needed to commit JSON back to repo
+      contents: write  # needed to commit JSON + HTML back to repo
 
     steps:
       - name: Checkout repo
@@ -51,10 +52,14 @@ jobs:
       - name: Generate model picks
         run: python3 model/6_predict_today.py
 
-      - name: Commit picks JSON to repo
+      - name: Generate cheatsheet website
+        run: python3 model/generate_site.py
+
+      - name: Commit all outputs to repo
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add model/picks_today.json model/picks_log.json lines_cache.json || true
-          git diff --staged --quiet || git commit -m "chore: daily picks $(date -u +%Y-%m-%d)"
+          git add model/picks_today.json model/picks_log.json lines_cache.json \
+                  model/picks_today.txt docs/index.html || true
+          git diff --staged --quiet || git commit -m "chore: daily picks + site $(date -u +%Y-%m-%d)"
           git push
