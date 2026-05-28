@@ -109,23 +109,34 @@ with tab1:
 
         # ── Pick cards ─────────────────────────────────────────────────────────
         for pick in picks:
-            edge = pick["edge"]
+            edge  = pick["edge"]
+            grade = pick.get("grade", "")
 
             if edge >= 0.08:
-                color  = "#ff6b35"
-                emoji  = "🔥🔥"
+                color = "#ff6b35"
+                emoji = "🔥🔥"
             elif edge >= 0.05:
-                color  = "#4ecca3"
-                emoji  = "✅"
+                color = "#4ecca3"
+                emoji = "✅"
             else:
-                color  = "#7ec8e3"
-                emoji  = "📈"
+                color = "#7ec8e3"
+                emoji = "📈"
+
+            grade_badge = ""
+            if grade == "A+":
+                grade_badge = " &nbsp;<span style='background:#ff6b35;color:#fff;border-radius:4px;padding:1px 7px;font-size:0.78em;font-weight:bold'>A+</span>"
+            elif grade == "A":
+                grade_badge = " &nbsp;<span style='background:#4ecca3;color:#111;border-radius:4px;padding:1px 7px;font-size:0.78em;font-weight:bold'>A</span>"
+            elif grade == "B+":
+                grade_badge = " &nbsp;<span style='background:#7ec8e3;color:#111;border-radius:4px;padding:1px 7px;font-size:0.78em;font-weight:bold'>B+</span>"
+            elif grade:
+                grade_badge = " &nbsp;<span style='background:#888;color:#fff;border-radius:4px;padding:1px 7px;font-size:0.78em;font-weight:bold'>B</span>"
 
             st.markdown(f"""
 <div class="pick-card" style="border-left: 5px solid {color}; background: rgba(255,255,255,0.04)">
   <div class="pick-sport">{pick['sport']}</div>
   <div class="pick-game">{pick['matchup']}</div>
-  <div class="pick-bet">{pick['bet']}</div>
+  <div class="pick-bet">{pick['bet']}{grade_badge}</div>
   <div class="pick-edge" style="color:{color}">{emoji}&nbsp; {pick['label']} &nbsp;·&nbsp; Edge: {pick['edge_pct']}</div>
   <div class="pick-probs">
     Model: <strong>{pick['model_p']}</strong>
@@ -139,6 +150,51 @@ with tab1:
             conf = pick["model_prob"]
             bar_val = max(0.0, min(1.0, (conf - 0.5) * 2))
             st.progress(bar_val, text=f"Model confidence: {conf:.1%}")
+
+            # ── L10 breakdown table ────────────────────────────────────────────
+            hl = pick.get("home_l10")
+            al = pick.get("away_l10")
+            if hl and al:
+                bet_team = pick["bet_team"]
+                rows = [hl, al]
+                tbl_data = []
+                for s in rows:
+                    star = "★" if s["team"] == bet_team else ""
+                    rec  = f"{s['w']}-{s['l']}"
+                    # Colour code the record cell
+                    wr = s["wr"]
+                    if wr >= 0.6:
+                        rec_disp = f"🟢 {rec}"
+                    elif wr <= 0.3:
+                        rec_disp = f"🔴 {rec}"
+                    else:
+                        rec_disp = f"🟡 {rec}"
+                    tbl_data.append({
+                        "Pick": star,
+                        "Team": s["team"],
+                        "L10":  rec_disp,
+                        "R/G":  s["rspg"],
+                        "RA/G": s["rapg"],
+                        "Home": s["home"],
+                        "Away": s["away"],
+                    })
+                l10_df = pd.DataFrame(tbl_data)
+                st.dataframe(
+                    l10_df,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Pick": st.column_config.TextColumn("", width="small"),
+                        "Team": st.column_config.TextColumn("Team"),
+                        "L10":  st.column_config.TextColumn("L10"),
+                        "R/G":  st.column_config.NumberColumn("R/G",  format="%.1f"),
+                        "RA/G": st.column_config.NumberColumn("RA/G", format="%.1f"),
+                        "Home": st.column_config.TextColumn("Home"),
+                        "Away": st.column_config.TextColumn("Away"),
+                    },
+                )
+                st.caption("★ = model's pick  ·  🟢 ≥6-4  🟡 5-5  🔴 ≤4-6  ·  2026 season L10")
+            st.divider()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

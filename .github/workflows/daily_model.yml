@@ -5,6 +5,7 @@
 #   (none — ESPN odds API is free, no key needed)
 #
 # The workflow:
+#   0. Updates game database (fetches completed games since last run)
 #   1. Fetches today's odds from ESPN (free, no key)
 #   2. Runs the ML model to generate picks
 #   3. Commits picks_today.json + picks_log.json back to the repo
@@ -37,6 +38,9 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r model/requirements.txt
+
+      - name: Update game database
+        run: python3 model/1c_update_recent_games.py
 
       - name: Mark yesterday's results
         run: python3 model/7_mark_results.py

@@ -152,6 +152,58 @@ def get_mlb_rolling(conn, team, before_date, window=10):
             margins.append(away_score - home_score)
     return round(np.mean(wins), 4), round(np.mean(margins), 3)
 
+
+def get_l10_full(conn, team, before_date, window=10):
+    """Full L10 breakdown: record, R/G, RA/G, home split, away split, last game."""
+    sql = """
+        SELECT home_team, away_team, home_score, away_score, game_date
+        FROM mlb_games
+        WHERE (home_team=? OR away_team=?)
+          AND game_date < ?
+          AND status = 'Final'
+        ORDER BY game_date DESC
+        LIMIT ?
+    """
+    rows = conn.execute(sql, (team, team, before_date, window)).fetchall()
+    if not rows:
+        return {"team": team, "w": 0, "l": 0, "n": 0, "wr": 0.5,
+                "rspg": 0.0, "rapg": 0.0, "home": "0-0", "away": "0-0",
+                "last_game": "N/A"}
+
+    wins = losses = hw = hl = aw = al = 0
+    rs = ra = 0
+    last_game = rows[0][4]
+
+    for ht, at, hs, as_, _ in rows:
+        is_home = (ht == team)
+        won = (hs > as_) if is_home else (as_ > hs)
+        if won:
+            wins += 1
+            if is_home: hw += 1
+            else:        aw += 1
+        else:
+            losses += 1
+            if is_home: hl += 1
+            else:        al += 1
+        if is_home:
+            rs += hs; ra += as_
+        else:
+            rs += as_; ra += hs
+
+    n = wins + losses
+    return {
+        "team":      team,
+        "w":         wins,
+        "l":         losses,
+        "n":         n,
+        "wr":        round(wins / n, 3) if n else 0.5,
+        "rspg":      round(rs / n, 1)  if n else 0.0,
+        "rapg":      round(ra / n, 1)  if n else 0.0,
+        "home":      f"{hw}-{hl}",
+        "away":      f"{aw}-{al}",
+        "last_game": last_game,
+    }
+
 def get_nba_rolling(conn, team_name, before_date, window=10):
     """Last-N games win rate and scoring margin for an NBA team."""
     sql = """
@@ -353,7 +405,8 @@ def edge_bar(edge):
     if edge >= 0.03:  return "📈 EDGE"
     return "—"
 
-def format_pick(sport, game, model_prob, market_prob, home_ml, away_ml, rec_side):
+def format_pick(sport, game, model_prob, market_prob, home_ml, away_ml, rec_side,
+                home_l10=None, away_l10=None):
     home  = game["home_team"]
     away  = game["away_team"]
     edge  = abs(model_prob - market_prob)
@@ -370,7 +423,7 @@ def format_pick(sport, game, model_prob, market_prob, home_ml, away_ml, rec_side
         side_prob  = 1 - model_prob
         side_mkt   = 1 - market_prob
 
-    return {
+    pick = {
         "sport":       sport,
         "matchup":     f"{away} @ {home}",
         "home_team":   home,
@@ -389,6 +442,34 @@ def format_pick(sport, game, model_prob, market_prob, home_ml, away_ml, rec_side
         "market_p":    f"{side_mkt:.1%}",
         "edge_raw":    edge,
     }
+
+    # Attach L10 stats for both teams (used in dashboard + email)
+    if home_l10:
+        pick["home_l10"] = home_l10
+    if away_l10:
+        pick["away_l10"] = away_l10
+
+    # Grade based on L10 comparison
+    if home_l10 and away_l10:
+        pick["grade"] = _pick_grade(pick, home_l10, away_l10)
+
+    return pick
+
+
+def _pick_grade(pick, home_l10, away_l10):
+    """A+/A/B+/B based on L10 form of bet team vs opponent."""
+    bet_l10  = home_l10 if pick["side"] == "home" else away_l10
+    opp_l10  = away_l10 if pick["side"] == "home" else home_l10
+    wr_diff  = bet_l10["wr"] - opp_l10["wr"]
+    opp_cold = opp_l10["w"] <= 2  # opponent ≤2-8 in L10
+
+    if opp_cold and wr_diff >= 0:
+        return "A+"
+    if wr_diff >= 0.2:
+        return "A"
+    if wr_diff >= 0.0:
+        return "B+"
+    return "B"
 
 def print_report(picks, today):
     print("\n" + "━"*58)
@@ -414,22 +495,37 @@ def print_report(picks, today):
     print("━"*58)
 
 def report_as_text(picks, today):
-    """Plain-text version for email insertion."""
-    lines = [
-        "━"*52,
-        f"MODEL PICKS — {today}",
-        "━"*52,
-    ]
+    """Plain-text version for email insertion — includes L10 breakdown."""
+    div = "━" * 52
+    lines = [div, f"MODEL PICKS — {today}", div]
+
     if not picks:
         lines.append("No edges found today (model agrees with market on all games).")
     else:
         picks.sort(key=lambda p: p["edge_raw"], reverse=True)
         for p in picks:
-            lines.append(f"[{p['sport']}] {p['matchup']}")
-            lines.append(f"  BET: {p['bet']}")
-            lines.append(f"  Model {p['model_p']} vs Market {p['market_p']} | Edge {p['edge']} {p['label']}")
-            lines.append("")
-    lines.append("━"*52)
+            grade = p.get("grade", "")
+            grade_str = f"  [{grade}]" if grade else ""
+            lines.append(f"\n[{p['sport']}] {p['matchup']}")
+            lines.append(f"  BET: {p['bet']}{grade_str}")
+            lines.append(f"  Model {p['model_p']} vs Market {p['market_p']} | Edge {p['edge_pct']} {p['label']}")
+
+            # L10 table
+            hl = p.get("home_l10")
+            al = p.get("away_l10")
+            if hl and al:
+                lines.append(f"  {'─'*48}")
+                lines.append(f"  {'TEAM':<26} {'L10':>5}  {'R/G':>5}  {'RA/G':>5}  {'Home':>5}  {'Away':>5}")
+                for s, marker in [(hl, "H"), (al, "A")]:
+                    star = "★ " if s["team"] == p["bet_team"] else "  "
+                    rec  = f"{s['w']}-{s['l']}"
+                    lines.append(
+                        f"  {star}{s['team']:<24} {rec:>5}  {s['rspg']:>5.1f}  "
+                        f"{s['rapg']:>5.1f}  {s['home']:>5}  {s['away']:>5}"
+                    )
+                lines.append(f"  {'─'*48}")
+
+    lines.append(div)
     return "\n".join(lines)
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -493,12 +589,18 @@ def run_predictions():
             all_games.append(game_entry)
 
             if edge_home > EDGE_THRESHOLD and home_ml >= -250:
+                home_l10 = get_l10_full(conn, game["home_team"], today) if conn else None
+                away_l10 = get_l10_full(conn, game["away_team"], today) if conn else None
                 picks.append(format_pick("MLB", game, model_prob, mkt_hp,
-                                         home_ml, away_ml, "home"))
+                                         home_ml, away_ml, "home",
+                                         home_l10=home_l10, away_l10=away_l10))
                 game_entry["has_pick"] = True
             elif edge_away > EDGE_THRESHOLD and away_ml >= -250:
+                home_l10 = get_l10_full(conn, game["home_team"], today) if conn else None
+                away_l10 = get_l10_full(conn, game["away_team"], today) if conn else None
                 picks.append(format_pick("MLB", game, model_prob, mkt_hp,
-                                         home_ml, away_ml, "away"))
+                                         home_ml, away_ml, "away",
+                                         home_l10=home_l10, away_l10=away_l10))
                 game_entry["has_pick"] = True
 
     # ── NBA ──
