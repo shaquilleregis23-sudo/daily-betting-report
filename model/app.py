@@ -34,11 +34,14 @@ st.markdown("""
     margin: 8px 0 14px 0;
     font-family: sans-serif;
 }
-.pick-sport { font-size: 0.75em; font-weight: bold; letter-spacing: 1px; opacity: 0.7; }
-.pick-game  { font-size: 0.9em; opacity: 0.7; margin: 2px 0; }
-.pick-bet   { font-size: 1.25em; font-weight: bold; margin: 6px 0; }
-.pick-edge  { font-size: 1.05em; font-weight: bold; }
-.pick-probs { font-size: 0.85em; opacity: 0.75; margin-top: 6px; }
+.pick-sport  { font-size: 0.75em; font-weight: bold; letter-spacing: 1px; opacity: 0.7; }
+.pick-game   { font-size: 0.9em; opacity: 0.7; margin: 2px 0; }
+.pick-bet    { font-size: 1.25em; font-weight: bold; margin: 6px 0; }
+.pick-edge   { font-size: 1.05em; font-weight: bold; }
+.pick-probs  { font-size: 0.85em; opacity: 0.75; margin-top: 4px; }
+.pick-kelly  { font-size: 0.85em; opacity: 0.85; margin-top: 3px; }
+.clv-positive { color: #4ecca3; font-weight: bold; }
+.clv-negative { color: #ff6b35; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -98,12 +101,14 @@ with tab1:
         st.info("No edges found today — model agrees with the market on all games.")
     else:
         # ── Summary strip ──────────────────────────────────────────────────────
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Picks", summary.get("total_picks", len(picks)))
-        c2.metric("MLB", summary.get("mlb_picks", 0))
-        c3.metric("NBA", summary.get("nba_picks", 0))
-        top_edge = max(p["edge"] for p in picks) if picks else 0
-        c4.metric("Top Edge", f"+{top_edge:.1%}")
+        c2.metric("MLB",   summary.get("mlb_picks", 0))
+        c3.metric("NBA",   summary.get("nba_picks", 0))
+        top_edge  = max(p["edge"] for p in picks) if picks else 0
+        top_kelly = max(p.get("kelly_fraction", 0) for p in picks) if picks else 0
+        c4.metric("Top Edge",  f"+{top_edge:.1%}")
+        c5.metric("Top Kelly", f"{top_kelly:.1%}")
 
         st.divider()
 
@@ -132,6 +137,16 @@ with tab1:
             elif grade:
                 grade_badge = " &nbsp;<span style='background:#888;color:#fff;border-radius:4px;padding:1px 7px;font-size:0.78em;font-weight:bold'>B</span>"
 
+            kelly     = pick.get("kelly_fraction", 0)
+            kelly_pct = pick.get("kelly_pct", f"{kelly:.1%}")
+            rec_units = pick.get("rec_units_per_1k", round(kelly * 10, 2))
+            kelly_line = (
+                f'<div class="pick-kelly" style="color:{color}">'
+                f'💰 Kelly: <strong>{kelly_pct}</strong> of bankroll'
+                f'{f" &nbsp;·&nbsp; ~{rec_units} units per $1,000" if rec_units else ""}'
+                f'</div>'
+            ) if kelly else ""
+
             st.markdown(f"""
 <div class="pick-card" style="border-left: 5px solid {color}; background: rgba(255,255,255,0.04)">
   <div class="pick-sport">{pick['sport']}</div>
@@ -143,6 +158,7 @@ with tab1:
     &nbsp;|&nbsp;
     Market: <strong>{pick['market_p']}</strong>
   </div>
+  {kelly_line}
 </div>
 """, unsafe_allow_html=True)
 
@@ -198,7 +214,7 @@ with tab1:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — PERFORMANCE TRACKER
+# TAB 2 — PERFORMANCE TRACKER  (with CLV)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab2:
     log = load_log()
@@ -208,7 +224,6 @@ with tab2:
     else:
         df = pd.DataFrame(log)
 
-        # Separate resolved vs pending
         resolved = df[df["result"].isin(["W", "L"])].copy()
         pending  = df[~df["result"].isin(["W", "L"])].copy()
 
@@ -228,11 +243,24 @@ with tab2:
             net_units = resolved["pnl"].sum()
             roi       = net_units / len(resolved) * 100
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Win Rate",  f"{wr:.1%}",   f"{wins}W–{losses}L")
+            # ── CLV ────────────────────────────────────────────────────────────
+            has_clv = resolved["clv"].notna() if "clv" in resolved.columns else pd.Series([False] * len(resolved))
+            avg_clv = resolved.loc[has_clv, "clv"].mean() if has_clv.any() else None
+
+            if avg_clv is None and "edge" in resolved.columns:
+                avg_clv_proxy = resolved["edge"].mean()
+                clv_label = f"{avg_clv_proxy:+.1%} (edge proxy)"
+                clv_help  = "True CLV requires closing odds. Showing avg model edge as proxy."
+            else:
+                clv_label = f"{avg_clv:+.1%}" if avg_clv is not None else "N/A"
+                clv_help  = "Avg closing line value. Positive = consistently beat the close."
+
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Win Rate",  f"{wr:.1%}", f"{wins}W–{losses}L")
             c2.metric("ROI",       f"{roi:+.1f}%")
             c3.metric("Net Units", f"{net_units:+.2f}")
             c4.metric("Resolved",  len(resolved))
+            c5.metric("Avg CLV",   clv_label, help=clv_help)
 
             # By sport
             st.divider()
@@ -245,17 +273,34 @@ with tab2:
                 swr = sw / len(sdf)
                 st.markdown(f"**{sport}** &nbsp; {sw}W–{sl}L &nbsp; ({swr:.1%}) &nbsp; {spl:+.2f} units")
 
-            # History table
+            # History table with optional CLV column
             st.divider()
             st.subheader("Bet History")
-            show = resolved[["date","sport","matchup","bet_team","ml","edge_pct","result","pnl"]].copy()
+            show_cols = ["date", "sport", "matchup", "bet_team", "ml", "edge_pct", "result", "pnl"]
+            if "clv" in resolved.columns and resolved["clv"].notna().any():
+                show_cols.insert(6, "clv")
+            show = resolved[show_cols].copy()
             show = show.rename(columns={
                 "date": "Date", "sport": "Sport", "matchup": "Game",
                 "bet_team": "Bet", "ml": "ML", "edge_pct": "Edge",
-                "result": "Result", "pnl": "Units",
+                "result": "Result", "pnl": "Units", "clv": "CLV",
             }).sort_values("Date", ascending=False)
             show["Units"] = show["Units"].apply(lambda x: f"{x:+.2f}")
+            if "CLV" in show.columns:
+                show["CLV"] = show["CLV"].apply(
+                    lambda x: f"{x:+.1%}" if isinstance(x, float) else "—"
+                )
             st.dataframe(show, hide_index=True, use_container_width=True)
+
+            with st.expander("What is CLV? Why does it matter?"):
+                st.markdown("""
+**Closing Line Value (CLV)** measures whether your bets were placed at better odds than where the market settled at game time.
+
+- **Positive CLV** = you got a better number than the closing price → your model is identifying edge the market later agrees with
+- **Negative CLV** = the market moved against you → could indicate noise, not real edge
+
+Sharp bettors consistently show positive CLV even on losing bets. It's a better long-term signal than win rate alone.
+""")
         else:
             st.info("No resolved bets yet. Mark your results below.")
 
@@ -263,9 +308,8 @@ with tab2:
         if len(pending) > 0:
             st.divider()
             st.subheader(f"Mark Results ({len(pending)} pending)")
-            st.caption("Check the Result column, then download and commit picks_log.json to save permanently.")
+            st.caption("Results auto-update via 7_mark_results.py each morning.")
 
-            # Editable table — user sets result column
             editable = pending[["date","sport","matchup","bet_team","ml","edge_pct","result"]].copy()
             editable["result"] = editable["result"].fillna("")
 
@@ -273,23 +317,20 @@ with tab2:
                 editable,
                 column_config={
                     "result": st.column_config.SelectboxColumn(
-                        "Result",
-                        options=["", "W", "L"],
-                        required=False,
+                        "Result", options=["", "W", "L"], required=False,
                     ),
-                    "date":      st.column_config.TextColumn("Date", disabled=True),
+                    "date":      st.column_config.TextColumn("Date",  disabled=True),
                     "sport":     st.column_config.TextColumn("Sport", disabled=True),
-                    "matchup":   st.column_config.TextColumn("Game", disabled=True),
-                    "bet_team":  st.column_config.TextColumn("Bet", disabled=True),
-                    "ml":        st.column_config.NumberColumn("ML", disabled=True),
-                    "edge_pct":  st.column_config.TextColumn("Edge", disabled=True),
+                    "matchup":   st.column_config.TextColumn("Game",  disabled=True),
+                    "bet_team":  st.column_config.TextColumn("Bet",   disabled=True),
+                    "ml":        st.column_config.NumberColumn("ML",  disabled=True),
+                    "edge_pct":  st.column_config.TextColumn("Edge",  disabled=True),
                 },
                 hide_index=True,
                 use_container_width=True,
             )
 
-            # Merge edits back into full log and offer download
-            updated_log = log.copy()
+            updated_log     = log.copy()
             pending_indices = pending.index.tolist()
             for i, (orig_idx, edit_row) in enumerate(zip(pending_indices, edited.itertuples())):
                 result_val = edit_row.result if edit_row.result in ("W", "L") else None
@@ -300,10 +341,9 @@ with tab2:
                 data=json.dumps(updated_log, indent=2),
                 file_name="picks_log.json",
                 mime="application/json",
-                help="Download, then replace model/picks_log.json in your GitHub repo to save results permanently.",
+                help="Manual override — only needed if auto-marking fails.",
             )
-
-            st.caption("After downloading: go to your GitHub repo → model/picks_log.json → edit (pencil icon) → paste contents → commit.")
+            st.caption("After downloading: GitHub repo → model/picks_log.json → edit → paste → commit.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -352,7 +392,45 @@ with tab3:
 
             st.dataframe(display, hide_index=True, use_container_width=True)
 
+            # ── Extra context table (starters, batting, weather) ───────────────
+            has_extras = any(
+                col in df.columns
+                for col in ["home_starter", "home_obp", "wind_speed"]
+            )
+            if has_extras and sport_filter in ("All", "MLB"):
+                st.divider()
+                st.subheader("MLB Context")
+                mlb_df = df[df["sport"] == "MLB"].copy() if "sport" in df.columns else df.copy()
+                context_rows = []
+                for _, row in mlb_df.iterrows():
+                    ctx = {"Game": row.get("matchup", "")}
+                    if "home_starter" in row:
+                        ctx["Home SP"] = row.get("home_starter", "TBD")
+                        ctx["Away SP"] = row.get("away_starter", "TBD")
+                    if "home_sp_era" in row or "home_era" in row:
+                        h_era = row.get("home_sp_era") or row.get("home_era")
+                        a_era = row.get("away_sp_era") or row.get("away_era")
+                        ctx["Home ERA"] = f"{h_era:.2f}" if h_era else "—"
+                        ctx["Away ERA"] = f"{a_era:.2f}" if a_era else "—"
+                    if "home_obp" in row and row.get("home_obp"):
+                        ctx["Home OBP"] = f"{row['home_obp']:.3f}"
+                        ctx["Away OBP"] = f"{row.get('away_obp', 0):.3f}"
+                    if "wind_speed" in row:
+                        wind = row.get("wind_speed", 0)
+                        temp = row.get("temp_f", 72)
+                        ctx["Wind (mph)"] = int(wind) if wind else "Dome"
+                        ctx["Temp (°F)"]  = int(temp)
+                    context_rows.append(ctx)
+                if context_rows:
+                    ctx_df = pd.DataFrame(context_rows)
+                    st.dataframe(ctx_df, hide_index=True, use_container_width=True)
+                    st.caption(
+                        "ERA = season ERA from MLB Stats API. "
+                        "OBP = team on-base pct. "
+                        "Wind/Temp = game-time stadium conditions."
+                    )
+
             st.caption(
-                "Edge direction: H = home team has edge, A = away team has edge. "
-                "⭐ = model generated a pick on this game."
+                "Edge: H = home team has model edge, A = away. "
+                "⭐ = pick generated on this game."
             )
